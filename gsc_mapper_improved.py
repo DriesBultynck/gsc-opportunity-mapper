@@ -35,6 +35,14 @@ CTR_FLOOR = {
 PRIORITY_QUANTILES = (0.70, 0.90)
 CLUSTERING_THRESHOLD_N = 10000  # Switch to MiniBatchKMeans if queries > this
 
+# Action effort ordering (1 = low effort, 4 = high effort)
+ACTION_EFFORT_ORDER = {
+    "CTR/snippet + internal links": 1,  # Low effort
+    "Content refresh + topical authority": 2,  # Medium effort
+    "Fix cannibalisation": 3,  # Medium-High effort
+    "Build/upgrade landing page": 4  # High effort
+}
+
 # Required field mappings for multi-language support
 REQUIRED_QUERY_FIELDS = {
     "query": ["query", "zoekopdracht", "requête", "consulta", "anfrage", "top queries", "queries", "zoekterm"],
@@ -577,6 +585,106 @@ def calculate_page_opportunities(q: pd.DataFrame, p: pd.DataFrame, cluster: pd.D
     
     return page_opportunity_all, page_opportunity_segment
 
+def analyze_cannibalization_risks(cluster_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Analyze cannibalization risks by finding clusters that compete for the same pages.
+    
+    Args:
+        cluster_df: DataFrame with cluster data including cannibalisation_risk, primary_page, etc.
+        
+    Returns:
+        DataFrame with cannibalization risk analysis
+    """
+    # Filter clusters with cannibalization risk
+    risk_clusters = cluster_df[cluster_df["cannibalisation_risk"] == True].copy()
+    
+    if risk_clusters.empty:
+        return pd.DataFrame(columns=[
+            "primary_cluster_id", "primary_topic", "primary_intent",
+            "competing_cluster_id", "competing_topic", "competing_intent",
+            "shared_page", "primary_match_score", "runner_up_match_score",
+            "score_difference", "risk_level"
+        ])
+    
+    # Group by primary_page to find clusters competing for same page
+    risk_rows = []
+    
+    for page in risk_clusters["primary_page"].unique():
+        page_clusters = risk_clusters[risk_clusters["primary_page"] == page].copy()
+        
+        if len(page_clusters) > 1:
+            # Multiple clusters targeting same page - create pairs
+            for i, row1 in page_clusters.iterrows():
+                for j, row2 in page_clusters.iterrows():
+                    if i < j:  # Avoid duplicates
+                        score_diff = abs(row1["match_score"] - row2["match_score"])
+                        
+                        # Determine risk level
+                        if score_diff < 0.01:
+                            risk_level = "High"
+                        elif score_diff < 0.02:
+                            risk_level = "Medium"
+                        else:
+                            risk_level = "Low"
+                        
+                        risk_rows.append({
+                            "primary_cluster_id": row1["cluster_id"],
+                            "primary_topic": row1["topic_label"],
+                            "primary_intent": row1["intent"],
+                            "competing_cluster_id": row2["cluster_id"],
+                            "competing_topic": row2["topic_label"],
+                            "competing_intent": row2["intent"],
+                            "shared_page": page,
+                            "primary_match_score": row1["match_score"],
+                            "runner_up_match_score": row2["match_score"],
+                            "score_difference": score_diff,
+                            "risk_level": risk_level
+                        })
+        
+        # Also check runner_up_page scenarios
+        for _, row in page_clusters.iterrows():
+            if pd.notna(row.get("runner_up_page")) and row["runner_up_page"] != page:
+                # Check if runner_up_page is also a primary_page for another cluster
+                competing = risk_clusters[risk_clusters["primary_page"] == row["runner_up_page"]]
+                if not competing.empty:
+                    for _, comp_row in competing.iterrows():
+                        score_diff = abs(row["match_score"] - row["runner_up_score"])
+                        
+                        if score_diff < 0.01:
+                            risk_level = "High"
+                        elif score_diff < 0.02:
+                            risk_level = "Medium"
+                        else:
+                            risk_level = "Low"
+                        
+                        risk_rows.append({
+                            "primary_cluster_id": row["cluster_id"],
+                            "primary_topic": row["topic_label"],
+                            "primary_intent": row["intent"],
+                            "competing_cluster_id": comp_row["cluster_id"],
+                            "competing_topic": comp_row["topic_label"],
+                            "competing_intent": comp_row["intent"],
+                            "shared_page": row["runner_up_page"],
+                            "primary_match_score": row["match_score"],
+                            "runner_up_match_score": row["runner_up_score"],
+                            "score_difference": score_diff,
+                            "risk_level": risk_level
+                        })
+    
+    if not risk_rows:
+        return pd.DataFrame(columns=[
+            "primary_cluster_id", "primary_topic", "primary_intent",
+            "competing_cluster_id", "competing_topic", "competing_intent",
+            "shared_page", "primary_match_score", "runner_up_match_score",
+            "score_difference", "risk_level"
+        ])
+    
+    risk_df = pd.DataFrame(risk_rows)
+    # Sort by score difference (ascending - smallest difference = highest risk)
+    risk_df = risk_df.sort_values("score_difference", ascending=True)
+    
+    return risk_df
+
 # ----------------------------
 # GPT Brief & Downloads
 # ----------------------------
@@ -791,8 +899,29 @@ def main():
             df_viz = df_viz[df_viz["brand_label"] == sel_brand]
         if sel_intent != "All":
             df_viz = df_viz[df_viz["intent"] == sel_intent]
-            
-        st.metric("Opportunity Clicks (Filtered)", f"{df_viz['opportunity_clicks'].sum():,.0f}")
+        
+        # Show opportunity clicks per intent
+        st.markdown("### Opportunity Clicks by Intent")
+        intent_opps = cluster_final.groupby("intent")["opportunity_clicks"].sum().sort_values(ascending=False)
+        intent_cols = st.columns(len(intent_opps))
+        for idx, (intent_name, opp_clicks) in enumerate(intent_opps.items()):
+            with intent_cols[idx]:
+                # Highlight if this intent is selected
+                is_selected = (sel_intent != "All" and sel_intent == intent_name)
+                if is_selected:
+                    # Use markdown to create a highlighted container
+                    st.markdown(
+                        f'<div style="background-color: #e8f4f8; padding: 15px; border-radius: 8px; border: 3px solid #1f77b4; margin-bottom: 10px;">',
+                        unsafe_allow_html=True
+                    )
+                    st.metric(intent_name.title(), f"{opp_clicks:,.0f}")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                else:
+                    st.metric(intent_name.title(), f"{opp_clicks:,.0f}")
+        
+        # Also show filtered total if filters are applied
+        if sel_brand != "All" or sel_intent != "All":
+            st.metric("Opportunity Clicks (Filtered)", f"{df_viz['opportunity_clicks'].sum():,.0f}")
         
         # Top 15 Clusters for Bubble Chart
         top_15 = df_viz.sort_values("opportunity_clicks", ascending=False).head(15).copy()
@@ -889,10 +1018,245 @@ def main():
             """)
 
     with tabs[1]:
-        st.subheader("Detailed Data")
-        st.dataframe(page_opps_segment)
-        st.subheader("Clusters (with Top Queries)")
-        st.dataframe(cluster_final)
+        st.subheader("Analysis Tables")
+        
+        # Create sub-tabs for different views
+        table_tabs = st.tabs([
+            "📊 All Keywords", 
+            "⚠️ Cannibalization Risks", 
+            "🎯 Action Priority",
+            "📋 Raw Data"
+        ])
+        
+        # Tab 1: Keyword-level table with filters
+        with table_tabs[0]:
+            st.markdown("### Filter and View All Keywords")
+            
+            # Merge q_final with cluster_final to get topic_label, intent, and brand_label for each query
+            # Always get these from cluster_final to ensure consistency
+            # Check which columns are available in cluster_final
+            available_cols = ["cluster_id"]
+            if "topic_label" in cluster_final.columns:
+                available_cols.append("topic_label")
+            if "intent" in cluster_final.columns:
+                available_cols.append("intent")
+            if "brand_label" in cluster_final.columns:
+                available_cols.append("brand_label")
+            
+            cluster_cols = cluster_final[available_cols].copy()
+            if "intent" in cluster_cols.columns:
+                cluster_cols = cluster_cols.rename(columns={"intent": "intent_cluster"})
+            if "brand_label" in cluster_cols.columns:
+                cluster_cols = cluster_cols.rename(columns={"brand_label": "brand_label_cluster"})
+            
+            q_with_cluster = q_final.merge(
+                cluster_cols,
+                on="cluster_id",
+                how="left"
+            )
+            
+            # Use cluster values, falling back to query values if cluster values are missing
+            if "intent_cluster" in q_with_cluster.columns:
+                q_with_cluster["intent"] = q_with_cluster["intent_cluster"].fillna(
+                    q_with_cluster.get("intent", "")
+                )
+            elif "intent" not in q_with_cluster.columns:
+                q_with_cluster["intent"] = ""
+                
+            if "brand_label_cluster" in q_with_cluster.columns:
+                q_with_cluster["brand_label"] = q_with_cluster["brand_label_cluster"].fillna(
+                    q_with_cluster.get("brand_label", "")
+                )
+            elif "brand_label" not in q_with_cluster.columns:
+                q_with_cluster["brand_label"] = ""
+            
+            # Ensure topic_label exists
+            if "topic_label" not in q_with_cluster.columns:
+                # Fallback: create topic_label from cluster_id mapping
+                topic_map = cluster_final.set_index("cluster_id")["topic_label"].to_dict()
+                q_with_cluster["topic_label"] = q_with_cluster["cluster_id"].map(topic_map)
+            
+            # Get unique values for filters (handle missing columns gracefully)
+            unique_topics = sorted(q_with_cluster["topic_label"].dropna().unique().tolist()) if "topic_label" in q_with_cluster.columns and len(q_with_cluster["topic_label"].dropna()) > 0 else []
+            unique_intents = sorted(q_with_cluster["intent"].dropna().unique().tolist()) if "intent" in q_with_cluster.columns and len(q_with_cluster["intent"].dropna()) > 0 else []
+            unique_brands = sorted(q_with_cluster["brand_label"].dropna().unique().tolist()) if "brand_label" in q_with_cluster.columns and len(q_with_cluster["brand_label"].dropna()) > 0 else []
+            
+            # Filters
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                selected_topics = st.multiselect(
+                    "Filter by Topic",
+                    options=unique_topics,
+                    default=[],
+                    key="keyword_filter_topics"
+                )
+            with col2:
+                selected_intents = st.multiselect(
+                    "Filter by Intent",
+                    options=unique_intents,
+                    default=[],
+                    key="keyword_filter_intents"
+                )
+            with col3:
+                selected_brands = st.multiselect(
+                    "Filter by Brand",
+                    options=unique_brands,
+                    default=[],
+                    key="keyword_filter_brands"
+                )
+            
+            # Apply filters
+            filtered_q = q_with_cluster.copy()
+            if selected_topics and "topic_label" in filtered_q.columns:
+                filtered_q = filtered_q[filtered_q["topic_label"].isin(selected_topics)]
+            if selected_intents and "intent" in filtered_q.columns:
+                filtered_q = filtered_q[filtered_q["intent"].isin(selected_intents)]
+            if selected_brands and "brand_label" in filtered_q.columns:
+                filtered_q = filtered_q[filtered_q["brand_label"].isin(selected_brands)]
+            
+            # Display count
+            st.metric("Filtered Keywords", len(filtered_q))
+            
+            # Select columns to display (only include columns that exist)
+            all_display_cols = [
+                "query", "topic_label", "intent", "brand_label",
+                "clicks", "impressions", "ctr", "position",
+                "opportunity_clicks", "priority_score", "priority_band", "primary_page"
+            ]
+            display_cols = [col for col in all_display_cols if col in filtered_q.columns]
+            
+            # Sort options (only show columns that exist)
+            available_sort_cols = [col for col in ["clicks", "impressions", "opportunity_clicks", "position", "priority_score"] if col in filtered_q.columns]
+            if not available_sort_cols:
+                available_sort_cols = ["query"]  # Fallback to query if no metrics available
+            
+            sort_col = st.selectbox(
+                "Sort by",
+                options=available_sort_cols,
+                index=min(2, len(available_sort_cols) - 1) if "opportunity_clicks" in available_sort_cols else 0,
+                key="keyword_sort"
+            )
+            sort_asc = st.checkbox("Ascending", value=False, key="keyword_sort_asc")
+            
+            if sort_col in filtered_q.columns:
+                filtered_q_sorted = filtered_q.sort_values(sort_col, ascending=sort_asc)
+            else:
+                filtered_q_sorted = filtered_q
+            
+            # Display table
+            st.dataframe(
+                filtered_q_sorted[display_cols],
+                use_container_width=True,
+                height=400
+            )
+        
+        # Tab 2: Cannibalization risks
+        with table_tabs[1]:
+            st.markdown("### Cannibalization Risk Analysis")
+            
+            risk_df = analyze_cannibalization_risks(cluster_final)
+            
+            if risk_df.empty:
+                st.info("No cannibalization risks detected.")
+            else:
+                # Summary stats
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Risks", len(risk_df))
+                with col2:
+                    high_risk = len(risk_df[risk_df["risk_level"] == "High"])
+                    st.metric("High Risk", high_risk)
+                with col3:
+                    st.metric("Medium Risk", len(risk_df[risk_df["risk_level"] == "Medium"]))
+                
+                # Color coding function for risk levels
+                def color_risk(val):
+                    if val == "High":
+                        return "background-color: #ffcccc"
+                    elif val == "Medium":
+                        return "background-color: #fff4cc"
+                    else:
+                        return "background-color: #ccffcc"
+                
+                # Display table with styling
+                display_risk_cols = [
+                    "primary_topic", "primary_intent",
+                    "competing_topic", "competing_intent",
+                    "shared_page", "primary_match_score", "runner_up_match_score",
+                    "score_difference", "risk_level"
+                ]
+                
+                styled_df = risk_df[display_risk_cols].style.applymap(
+                    color_risk,
+                    subset=["risk_level"]
+                )
+                
+                st.dataframe(
+                    styled_df,
+                    use_container_width=True,
+                    height=400
+                )
+        
+        # Tab 3: Action priority sorted by effort
+        with table_tabs[2]:
+            st.markdown("### Action Priority by Effort Level")
+            
+            # Add effort_level column
+            cluster_with_effort = cluster_final.copy()
+            cluster_with_effort["effort_level"] = cluster_with_effort["recommended_action"].map(
+                ACTION_EFFORT_ORDER
+            ).fillna(99)  # Unknown actions go to end
+            
+            # Sort by effort_level (ascending - low effort first), then by opportunity_clicks (descending)
+            cluster_with_effort = cluster_with_effort.sort_values(
+                ["effort_level", "opportunity_clicks"],
+                ascending=[True, False]
+            )
+            
+            # Add effort level labels
+            effort_labels = {
+                1: "Low Effort",
+                2: "Medium Effort",
+                3: "Medium-High Effort",
+                4: "High Effort"
+            }
+            cluster_with_effort["effort_label"] = cluster_with_effort["effort_level"].map(effort_labels).fillna("Unknown")
+            
+            # Show counts per effort level (sorted by effort_level, not label)
+            effort_summary = cluster_with_effort.groupby("effort_level")["effort_label"].first().to_dict()
+            effort_counts = cluster_with_effort["effort_level"].value_counts().sort_index()
+            cols = st.columns(len(effort_counts))
+            for idx, (effort_level, count) in enumerate(effort_counts.items()):
+                if effort_level != 99:  # Skip unknown
+                    with cols[idx]:
+                        st.metric(effort_summary.get(effort_level, f"Level {effort_level}"), int(count))
+            
+            # Group by effort level with expandable sections
+            for effort_level in sorted(cluster_with_effort["effort_level"].unique()):
+                if effort_level == 99:
+                    continue
+                effort_label = effort_labels.get(effort_level, f"Level {effort_level}")
+                effort_clusters = cluster_with_effort[cluster_with_effort["effort_level"] == effort_level]
+                
+                # Convert numpy types to Python bool for Streamlit
+                is_expanded = bool(effort_level == 1)
+                with st.expander(f"{effort_label} ({len(effort_clusters)} clusters)", expanded=is_expanded):
+                    display_cols = [
+                        "effort_label", "recommended_action", "topic_label", "intent",
+                        "opportunity_clicks", "priority_band", "primary_page", "avg_position"
+                    ]
+                    st.dataframe(
+                        effort_clusters[display_cols],
+                        use_container_width=True
+                    )
+        
+        # Tab 4: Original raw data tables
+        with table_tabs[3]:
+            st.subheader("Page Opportunities by Segment")
+            st.dataframe(page_opps_segment, use_container_width=True)
+            
+            st.subheader("Clusters (with Top Queries)")
+            st.dataframe(cluster_final, use_container_width=True)
 
     with tabs[2]:
         st.subheader("Download Pack")

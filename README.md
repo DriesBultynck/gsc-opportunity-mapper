@@ -41,6 +41,13 @@ Results are banded into:
 ### 🔍 Cannibalization Detection
 Identifies when multiple pages compete for the same query clusters (match scores within 3% of each other), flagging potential internal competition issues.
 
+### 🌍 Multi-Language Support
+Supports GSC exports in any language with automatic column detection:
+- **Auto-detection**: Automatically detects column names in English, Dutch, French, Spanish, German, and more
+- **Manual override**: Easily map columns manually if auto-detection doesn't match your CSV
+- **Visual mapping UI**: Expandable sections show detected columns and allow you to map each required field
+- **Validation**: Ensures all required columns are mapped before processing begins
+
 ## Installation
 
 ### Prerequisites
@@ -73,12 +80,14 @@ The app will open in your default browser at `http://localhost:8501`
 Export two CSV files from GSC (same date range):
 
 1. **Queries Export** (`Queries` report):
-   - Required columns: `Top queries`, `Clicks`, `Impressions`, `CTR`, `Position`
+   - Required data: Query/Page column, Clicks, Impressions, CTR, Position
+   - **Note**: Column names can be in any language (English, Dutch, French, Spanish, German, etc.)
    - Date range: Recommended 3-6 months for better clustering
 
 2. **Pages Export** (`Pages` report):
-   - Required columns: `Top pages`, `Clicks`, `Impressions`, `CTR`, `Position`
+   - Required data: Page/URL column, Clicks, Impressions, CTR, Position
    - Same date range as queries
+   - **Note**: Column names can be in any language
 
 ### Step 2: Configure Settings
 
@@ -88,11 +97,20 @@ In the sidebar:
   - Used to classify queries as branded/non-branded
   - Also included in navigational intent detection
 
-### Step 3: Upload and Process
+### Step 3: Upload and Map Columns
 
 1. Upload both CSV files using the file uploaders
-2. Click through the processing (automatic)
-3. Review results in three tabs:
+2. **Map columns** (if needed):
+   - Expand the "🔧 Column Mapping" sections for each CSV
+   - Review auto-detected column mappings (marked with ✅)
+   - Manually adjust any mappings using the dropdown menus
+   - All required fields must be mapped before processing
+3. The app will validate mappings and show errors if any are missing
+
+### Step 4: Process and Review
+
+1. Once all columns are mapped, processing begins automatically
+2. Review results in three tabs:
    - **Visuals**: Interactive bubble charts with filters
    - **Tables**: Detailed dataframes
    - **Download**: ZIP report with all outputs
@@ -250,10 +268,12 @@ Filtered results update the chart and opportunity metric.
 
 ### Data Processing
 
+- **Multi-language column mapping**: Auto-detects and maps CSV columns in multiple languages
 - Handles missing CTR values (calculates from clicks/impressions)
 - Normalizes queries (lowercase, removes special chars, handles apostrophes)
 - Tokenizes URLs for page matching
 - Robust error handling for malformed data
+- Column mapping validation before processing
 
 ### Dependencies
 
@@ -269,15 +289,18 @@ Filtered results update the chart and opportunity metric.
 
 1. **Date Range**: Use 3-6 months of data for stable clustering
 2. **Brand Terms**: Include all variations (e.g., "acme, acme corp, acme inc")
-3. **Data Quality**: Ensure GSC exports include all required columns
-4. **Review Clusters**: Check topic labels make sense; adjust brand terms if needed
-5. **Cannibalization**: Pay attention to flagged clusters; may need canonical tags or content consolidation
+3. **Data Quality**: Ensure GSC exports include all required columns (in any language)
+4. **Column Mapping**: For non-English exports, review auto-detected mappings and adjust if needed
+5. **Review Clusters**: Check topic labels make sense; adjust brand terms if needed
+6. **Cannibalization**: Pay attention to flagged clusters; may need canonical tags or content consolidation
 
 ## Troubleshooting
 
-### "Missing columns" error
-- Ensure CSV exports use exact column names: `Top queries`, `Clicks`, `Impressions`, `CTR`, `Position`
-- Check for typos or extra spaces in headers
+### "Missing column mappings" error
+- **All required fields must be mapped**: Use the column mapping UI to map each required field
+- **Auto-detection failed**: If auto-detection doesn't find a column, manually select it from the dropdown
+- **Check column names**: Ensure your CSV has columns containing the required data (query/page, clicks, impressions, CTR, position)
+- **Supported languages**: Auto-detection works for English, Dutch, French, Spanish, German, and more. For other languages, use manual mapping
 
 ### Clustering seems off
 - Verify brand terms are correctly configured

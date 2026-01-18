@@ -35,6 +35,23 @@ CTR_FLOOR = {
 PRIORITY_QUANTILES = (0.70, 0.90)
 CLUSTERING_THRESHOLD_N = 10000  # Switch to MiniBatchKMeans if queries > this
 
+# Required field mappings for multi-language support
+REQUIRED_QUERY_FIELDS = {
+    "query": ["query", "zoekopdracht", "requête", "consulta", "anfrage", "top queries", "queries", "zoekterm"],
+    "clicks": ["clicks", "klikken", "clics", "clic", "klicks", "click"],
+    "impressions": ["impressions", "weergaven", "impressions", "impresiones", "impressionen", "weergave"],
+    "ctr": ["ctr", "click-through rate", "taux de clic", "tasa de clics", "clickrate"],
+    "position": ["position", "pos", "posizione", "posición", "position", "rang", "rank"]
+}
+
+REQUIRED_PAGE_FIELDS = {
+    "page": ["page", "url", "pagina", "página", "seite", "top pages", "pages"],
+    "clicks": ["clicks", "klikken", "clics", "clic", "klicks", "click"],
+    "impressions": ["impressions", "weergaven", "impressions", "impresiones", "impressionen", "weergave"],
+    "ctr": ["ctr", "click-through rate", "taux de clic", "tasa de clics", "clickrate"],
+    "position": ["position", "pos", "posizione", "posición", "position", "rang", "rank"]
+}
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -132,6 +149,53 @@ def md_table(headers, rows, max_col_width=80):
     body = "\n".join(["| " + " | ".join([trunc(c) for c in r]) + " |" for r in rows])
     return "\n".join([hdr, sep, body])
 
+def detect_column_mapping(df: pd.DataFrame, required_fields: Dict[str, List[str]]) -> Dict[str, Optional[str]]:
+    """
+    Auto-detect column mappings based on common patterns and translations.
+    
+    Args:
+        df: DataFrame with CSV columns
+        required_fields: Dict mapping internal field name to list of possible column name patterns
+        
+    Returns:
+        Dict mapping internal field name to detected column name (or None if not found)
+    """
+    mapping = {}
+    df_columns_lower = {col.lower().strip(): col for col in df.columns}
+    
+    for field_name, patterns in required_fields.items():
+        detected = None
+        for pattern in patterns:
+            pattern_lower = pattern.lower().strip()
+            # Exact match
+            if pattern_lower in df_columns_lower:
+                detected = df_columns_lower[pattern_lower]
+                break
+            # Partial match (contains pattern)
+            for col_lower, col_original in df_columns_lower.items():
+                if pattern_lower in col_lower or col_lower in pattern_lower:
+                    detected = col_original
+                    break
+            if detected:
+                break
+        mapping[field_name] = detected
+    
+    return mapping
+
+def validate_column_mapping(mapping: Dict[str, Optional[str]], required_fields: List[str]) -> Tuple[bool, List[str]]:
+    """
+    Validate that all required fields have mappings.
+    
+    Args:
+        mapping: Dict mapping internal field name to column name (or None)
+        required_fields: List of required field names
+        
+    Returns:
+        Tuple of (is_valid, missing_fields)
+    """
+    missing = [field for field in required_fields if not mapping.get(field)]
+    return (len(missing) == 0, missing)
+
 # ----------------------------
 # Intent & Brand Logic
 # ----------------------------
@@ -201,15 +265,26 @@ def check_branded(q_norm: str, brand_regexes: List[re.Pattern]) -> bool:
 # Pipeline Steps
 # ----------------------------
 
-def preprocess_queries(df: pd.DataFrame, compiled_rules: Dict[str, List[re.Pattern]], brand_regexes: List[re.Pattern]) -> pd.DataFrame:
-    required_cols = ["Top queries", "Clicks", "Impressions", "CTR", "Position"]
-    missing = [c for c in required_cols if c not in df.columns]
+def preprocess_queries(df: pd.DataFrame, compiled_rules: Dict[str, List[re.Pattern]], brand_regexes: List[re.Pattern], column_mapping: Dict[str, str]) -> pd.DataFrame:
+    # Validate that all required columns are mapped
+    required_fields = ["query", "clicks", "impressions", "ctr", "position"]
+    missing = [field for field in required_fields if field not in column_mapping or not column_mapping[field]]
     if missing:
-        raise ValueError(f"Missing columns in Queries CSV: {missing}")
+        raise ValueError(f"Missing column mappings in Queries CSV: {missing}")
+    
+    # Validate that mapped columns exist in dataframe
+    missing_cols = [col for field, col in column_mapping.items() if col and col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Mapped columns not found in Queries CSV: {missing_cols}")
 
     q = df.rename(
-        columns={"Top queries": "query", "Clicks": "clicks", "Impressions": "impressions", 
-                 "CTR": "ctr_raw", "Position": "position"}
+        columns={
+            column_mapping["query"]: "query",
+            column_mapping["clicks"]: "clicks",
+            column_mapping["impressions"]: "impressions",
+            column_mapping["ctr"]: "ctr_raw",
+            column_mapping["position"]: "position"
+        }
     ).copy()
 
     q["clicks"] = pd.to_numeric(q["clicks"], errors="coerce").fillna(0).astype(float)
@@ -371,15 +446,26 @@ def aggregate_clusters(q: pd.DataFrame) -> pd.DataFrame:
     
     return cluster
 
-def preprocess_pages(df: pd.DataFrame) -> pd.DataFrame:
-    required_cols = ["Top pages", "Clicks", "Impressions", "CTR", "Position"]
-    missing = [c for c in required_cols if c not in df.columns]
+def preprocess_pages(df: pd.DataFrame, column_mapping: Dict[str, str]) -> pd.DataFrame:
+    # Validate that all required columns are mapped
+    required_fields = ["page", "clicks", "impressions", "ctr", "position"]
+    missing = [field for field in required_fields if field not in column_mapping or not column_mapping[field]]
     if missing:
-        raise ValueError(f"Missing columns in Pages CSV: {missing}")
+        raise ValueError(f"Missing column mappings in Pages CSV: {missing}")
+    
+    # Validate that mapped columns exist in dataframe
+    missing_cols = [col for field, col in column_mapping.items() if col and col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Mapped columns not found in Pages CSV: {missing_cols}")
 
     p = df.rename(
-        columns={"Top pages": "page", "Clicks": "page_clicks", "Impressions": "page_impressions", 
-                 "CTR": "page_ctr_raw", "Position": "page_position"}
+        columns={
+            column_mapping["page"]: "page",
+            column_mapping["clicks"]: "page_clicks",
+            column_mapping["impressions"]: "page_impressions",
+            column_mapping["ctr"]: "page_ctr_raw",
+            column_mapping["position"]: "page_position"
+        }
     ).copy()
 
     p["page_clicks"] = pd.to_numeric(p["page_clicks"], errors="coerce").fillna(0).astype(float)
@@ -568,14 +654,113 @@ def main():
         st.error(f"Error reading CSVs: {e}")
         st.stop()
 
+    # --- Column Mapping ---
+    # Initialize session state for column mappings
+    if "queries_column_mapping" not in st.session_state:
+        st.session_state.queries_column_mapping = {}
+    if "pages_column_mapping" not in st.session_state:
+        st.session_state.pages_column_mapping = {}
+    
+    # Auto-detect column mappings
+    queries_auto_mapping = detect_column_mapping(queries_df, REQUIRED_QUERY_FIELDS)
+    pages_auto_mapping = detect_column_mapping(pages_df, REQUIRED_PAGE_FIELDS)
+    
+    # Initialize session state with auto-detected mappings if empty
+    if not st.session_state.queries_column_mapping:
+        st.session_state.queries_column_mapping = queries_auto_mapping.copy()
+    if not st.session_state.pages_column_mapping:
+        st.session_state.pages_column_mapping = pages_auto_mapping.copy()
+    
+    # Column Mapping UI
+    with st.expander("🔧 Column Mapping - Queries CSV", expanded=False):
+        st.markdown("**Detected columns:** " + ", ".join(queries_df.columns.tolist()))
+        st.markdown("---")
+        
+        field_labels = {
+            "query": "Query/Page Column",
+            "clicks": "Clicks Column",
+            "impressions": "Impressions Column",
+            "ctr": "CTR Column",
+            "position": "Position Column"
+        }
+        
+        for field in ["query", "clicks", "impressions", "ctr", "position"]:
+            auto_detected = queries_auto_mapping.get(field)
+            current_value = st.session_state.queries_column_mapping.get(field, auto_detected)
+            
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                selected = st.selectbox(
+                    f"{field_labels[field]} → `{field}`",
+                    options=[None] + list(queries_df.columns),
+                    index=0 if current_value is None else (list(queries_df.columns).index(current_value) + 1 if current_value in queries_df.columns else 0),
+                    key=f"queries_mapping_{field}"
+                )
+                st.session_state.queries_column_mapping[field] = selected
+            with col2:
+                if selected == auto_detected and auto_detected:
+                    st.markdown("<br>✅ Auto-detected", unsafe_allow_html=True)
+                elif selected:
+                    st.markdown("<br>✓ Selected", unsafe_allow_html=True)
+    
+    with st.expander("🔧 Column Mapping - Pages CSV", expanded=False):
+        st.markdown("**Detected columns:** " + ", ".join(pages_df.columns.tolist()))
+        st.markdown("---")
+        
+        field_labels = {
+            "page": "Page/URL Column",
+            "clicks": "Clicks Column",
+            "impressions": "Impressions Column",
+            "ctr": "CTR Column",
+            "position": "Position Column"
+        }
+        
+        for field in ["page", "clicks", "impressions", "ctr", "position"]:
+            auto_detected = pages_auto_mapping.get(field)
+            current_value = st.session_state.pages_column_mapping.get(field, auto_detected)
+            
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                selected = st.selectbox(
+                    f"{field_labels[field]} → `{field}`",
+                    options=[None] + list(pages_df.columns),
+                    index=0 if current_value is None else (list(pages_df.columns).index(current_value) + 1 if current_value in pages_df.columns else 0),
+                    key=f"pages_mapping_{field}"
+                )
+                st.session_state.pages_column_mapping[field] = selected
+            with col2:
+                if selected == auto_detected and auto_detected:
+                    st.markdown("<br>✅ Auto-detected", unsafe_allow_html=True)
+                elif selected:
+                    st.markdown("<br>✓ Selected", unsafe_allow_html=True)
+    
+    # Validate column mappings
+    queries_valid, queries_missing = validate_column_mapping(
+        st.session_state.queries_column_mapping,
+        ["query", "clicks", "impressions", "ctr", "position"]
+    )
+    pages_valid, pages_missing = validate_column_mapping(
+        st.session_state.pages_column_mapping,
+        ["page", "clicks", "impressions", "ctr", "position"]
+    )
+    
+    if not queries_valid or not pages_valid:
+        error_msg = "**Please map all required columns before processing:**\n\n"
+        if not queries_valid:
+            error_msg += f"- **Queries CSV**: Missing mappings for {', '.join(queries_missing)}\n"
+        if not pages_valid:
+            error_msg += f"- **Pages CSV**: Missing mappings for {', '.join(pages_missing)}\n"
+        st.error(error_msg)
+        st.stop()
+
     with st.spinner("Running stratified pipeline..."):
         intent_rules = build_intent_rules(brand_terms)
         compiled_rules = compile_rules(intent_rules)
         brand_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in brand_terms]
 
         # Pipeline
-        q_clean = preprocess_queries(queries_df, compiled_rules, brand_regexes)
-        p_clean = preprocess_pages(pages_df)
+        q_clean = preprocess_queries(queries_df, compiled_rules, brand_regexes, st.session_state.queries_column_mapping)
+        p_clean = preprocess_pages(pages_df, st.session_state.pages_column_mapping)
         
         q_clustered = cluster_queries_stratified(q_clean)
         q_labeled = label_clusters(q_clustered)

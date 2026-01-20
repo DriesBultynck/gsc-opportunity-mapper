@@ -18,6 +18,14 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import AgglomerativeClustering, MiniBatchKMeans
 
+# Optional sentence-transformers for semantic clustering
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+    SentenceTransformer = None
+
 # ----------------------------
 # Configuration & Constants
 # ----------------------------
@@ -47,7 +55,7 @@ ACTION_EFFORT_ORDER = {
 REQUIRED_QUERY_FIELDS = {
     "query": ["query", "zoekopdracht", "requête", "consulta", "anfrage", "top queries", "queries", "zoekterm"],
     "clicks": ["clicks", "klikken", "clics", "clic", "klicks", "click"],
-    "impressions": ["impressions", "weergaven", "impressions", "impresiones", "impressionen", "weergave"],
+    "impressions": ["impressions", "weergaven", "impressions", "impresiones", "impressionen", "weergave", "vertoningen"],
     "ctr": ["ctr", "click-through rate", "taux de clic", "tasa de clics", "clickrate"],
     "position": ["position", "pos", "posizione", "posición", "position", "rang", "rank"]
 }
@@ -55,7 +63,7 @@ REQUIRED_QUERY_FIELDS = {
 REQUIRED_PAGE_FIELDS = {
     "page": ["page", "url", "pagina", "página", "seite", "top pages", "pages"],
     "clicks": ["clicks", "klikken", "clics", "clic", "klicks", "click"],
-    "impressions": ["impressions", "weergaven", "impressions", "impresiones", "impressionen", "weergave"],
+    "impressions": ["impressions", "weergaven", "impressions", "impresiones", "impressionen", "weergave", "vertoningen"],
     "ctr": ["ctr", "click-through rate", "taux de clic", "tasa de clics", "clickrate"],
     "position": ["position", "pos", "posizione", "posición", "position", "rang", "rank"]
 }
@@ -269,11 +277,23 @@ def check_branded(q_norm: str, brand_regexes: List[re.Pattern]) -> bool:
             return True
     return False
 
+def check_term_match(q_norm: str, term_regexes: List[re.Pattern]) -> bool:
+    """Check if query matches any of the given term regexes."""
+    for rgx in term_regexes:
+        if rgx.search(q_norm):
+            return True
+    return False
+
 # ----------------------------
 # Pipeline Steps
 # ----------------------------
 
-def preprocess_queries(df: pd.DataFrame, compiled_rules: Dict[str, List[re.Pattern]], brand_regexes: List[re.Pattern], column_mapping: Dict[str, str]) -> pd.DataFrame:
+def preprocess_queries(df: pd.DataFrame, compiled_rules: Dict[str, List[re.Pattern]], brand_regexes: List[re.Pattern], column_mapping: Dict[str, str], 
+                       exclusion_regexes: Optional[List[re.Pattern]] = None,
+                       competitor_regexes: Optional[List[re.Pattern]] = None,
+                       local_regexes: Optional[List[re.Pattern]] = None,
+                       product_brand_regexes: Optional[List[re.Pattern]] = None,
+                       product_names_regexes: Optional[List[re.Pattern]] = None) -> pd.DataFrame:
     # Validate that all required columns are mapped
     required_fields = ["query", "clicks", "impressions", "ctr", "position"]
     missing = [field for field in required_fields if field not in column_mapping or not column_mapping[field]]
@@ -304,6 +324,19 @@ def preprocess_queries(df: pd.DataFrame, compiled_rules: Dict[str, List[re.Patte
     
     q["query_norm"] = normalize_query_vectorized(q["query"])
 
+    # Exclusion filter - remove queries containing exclusion terms
+    excluded_count = 0
+    if exclusion_regexes:
+        exclusion_mask = q["query_norm"].apply(lambda s: check_term_match(s, exclusion_regexes))
+        excluded_count = int(exclusion_mask.sum())
+        q = q[~exclusion_mask].copy()
+        if q.empty:
+            raise ValueError("All queries were filtered out by exclusion terms. Please adjust your exclusion terms.")
+    
+    # Store excluded count in a custom attribute (will be accessed via getattr)
+    if excluded_count > 0:
+        q._excluded_count = excluded_count
+
     # Intent
     intents = q["query_norm"].apply(lambda s: classify_intent_row(s, compiled_rules))
     q["intent"] = [x[0] for x in intents]
@@ -313,8 +346,54 @@ def preprocess_queries(df: pd.DataFrame, compiled_rules: Dict[str, List[re.Patte
     q["is_branded"] = q["query_norm"].apply(lambda s: check_branded(s, brand_regexes))
     q["brand_label"] = q["is_branded"].map({True: "Branded", False: "Non-Branded"})
     
-    # Segment for Stratified Clustering
+    # Additional term category checks
+    if competitor_regexes:
+        q["has_competitor"] = q["query_norm"].apply(lambda s: check_term_match(s, competitor_regexes))
+    else:
+        q["has_competitor"] = False
+    
+    if local_regexes:
+        q["has_local"] = q["query_norm"].apply(lambda s: check_term_match(s, local_regexes))
+    else:
+        q["has_local"] = False
+    
+    if product_brand_regexes:
+        q["has_product_brand"] = q["query_norm"].apply(lambda s: check_term_match(s, product_brand_regexes))
+    else:
+        q["has_product_brand"] = False
+    
+    if product_names_regexes:
+        q["has_product_name"] = q["query_norm"].apply(lambda s: check_term_match(s, product_names_regexes))
+    else:
+        q["has_product_name"] = False
+    
+    # Build segment components - include term categories as part of segmentation
+    # Start with brand and intent
     q["segment"] = q["brand_label"] + " - " + q["intent"]
+    
+    # Add term category labels to segment if they match
+    term_labels = []
+    
+    if competitor_regexes:
+        q["competitor_label"] = q["has_competitor"].map({True: "Competitor", False: ""})
+        term_labels.append("competitor_label")
+    
+    if local_regexes:
+        q["local_label"] = q["has_local"].map({True: "Local", False: ""})
+        term_labels.append("local_label")
+    
+    if product_brand_regexes:
+        q["product_brand_label"] = q["has_product_brand"].map({True: "ProductBrand", False: ""})
+        term_labels.append("product_brand_label")
+    
+    if product_names_regexes:
+        q["product_name_label"] = q["has_product_name"].map({True: "ProductName", False: ""})
+        term_labels.append("product_name_label")
+    
+    # Append non-empty term labels to segment
+    for label_col in term_labels:
+        mask = q[label_col] != ""
+        q.loc[mask, "segment"] = q.loc[mask, "segment"] + " - " + q.loc[mask, label_col]
     
     return q
 
@@ -351,7 +430,7 @@ def cluster_queries_stratified(q: pd.DataFrame) -> pd.DataFrame:
             simdist = 1 - cosine_similarity(X)
             simdist[simdist < 0] = 0
             cl = AgglomerativeClustering(metric="precomputed", linkage="average", 
-                                         distance_threshold=0.85, n_clusters=None)
+                                         distance_threshold=0.75, n_clusters=None)
             labels = cl.fit_predict(simdist)
             
         q.loc[indices, "cluster_id"] = labels + next_start_id
@@ -391,6 +470,164 @@ def label_clusters(q: pd.DataFrame) -> pd.DataFrame:
             topic_map[cid] = fallback
 
     q["topic_label"] = q["cluster_id"].map(topic_map)
+    return q
+
+def detect_singular_plural(word1: str, word2: str) -> bool:
+    """
+    Detect if two words are singular/plural forms of each other.
+    Uses simple heuristics: -s, -es, -ies endings, and common irregular forms.
+    """
+    w1_lower = word1.lower().strip()
+    w2_lower = word2.lower().strip()
+    
+    if w1_lower == w2_lower:
+        return False
+    
+    # Common plural patterns
+    if w1_lower + 's' == w2_lower or w2_lower + 's' == w1_lower:
+        return True
+    if w1_lower + 'es' == w2_lower or w2_lower + 'es' == w1_lower:
+        return True
+    if w1_lower.endswith('ies') and w2_lower == w1_lower[:-3] + 'y':
+        return True
+    if w2_lower.endswith('ies') and w1_lower == w2_lower[:-3] + 'y':
+        return True
+    
+    # Common irregular plurals
+    irregular = {
+        'child': 'children', 'children': 'child',
+        'person': 'people', 'people': 'person',
+        'mouse': 'mice', 'mice': 'mouse',
+        'foot': 'feet', 'feet': 'foot',
+        'tooth': 'teeth', 'teeth': 'tooth',
+        'goose': 'geese', 'geese': 'goose',
+    }
+    if w1_lower in irregular and irregular[w1_lower] == w2_lower:
+        return True
+    
+    return False
+
+def merge_singular_plural_clusters(q: pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge clusters that are singular/plural forms of each other if they have the same intent.
+    """
+    q_merged = q.copy()
+    
+    # Group by intent and get unique topic labels
+    for intent in q_merged["intent"].unique():
+        intent_clusters = q_merged[q_merged["intent"] == intent]
+        cluster_topics = intent_clusters.groupby("cluster_id")["topic_label"].first().to_dict()
+        
+        # Find clusters to merge
+        clusters_to_merge = {}
+        cluster_ids = list(cluster_topics.keys())
+        
+        for i, cid1 in enumerate(cluster_ids):
+            for cid2 in cluster_ids[i+1:]:
+                topic1 = cluster_topics[cid1]
+                topic2 = cluster_topics[cid2]
+                
+                # Check if topics are singular/plural
+                topic1_words = set(topic1.lower().split())
+                topic2_words = set(topic2.lower().split())
+                
+                # Check for singular/plural pairs
+                has_singular_plural = False
+                for w1 in topic1_words:
+                    for w2 in topic2_words:
+                        if detect_singular_plural(w1, w2):
+                            has_singular_plural = True
+                            break
+                    if has_singular_plural:
+                        break
+                
+                if has_singular_plural:
+                    # Merge: keep the smaller cluster_id, update all references
+                    keep_id = min(cid1, cid2)
+                    merge_id = max(cid1, cid2)
+                    if merge_id not in clusters_to_merge:
+                        clusters_to_merge[merge_id] = keep_id
+        
+        # Apply merges
+        for merge_id, keep_id in clusters_to_merge.items():
+            q_merged.loc[q_merged["cluster_id"] == merge_id, "cluster_id"] = keep_id
+    
+    return q_merged
+
+def cluster_queries_stratified_semantic(q: pd.DataFrame, model_name: str = "all-MiniLM-L6-v2") -> pd.DataFrame:
+    """
+    Clusters queries using sentence-transformers for semantic similarity.
+    Falls back to TF-IDF if sentence-transformers is not available.
+    """
+    if not SENTENCE_TRANSFORMERS_AVAILABLE:
+        # Fallback to original method
+        return cluster_queries_stratified(q)
+    
+    q["cluster_id"] = -1
+    unique_segments = q["segment"].unique()
+    next_start_id = 0
+    
+    # Load model once (cache in session state for performance)
+    cache_key = f"sentence_model_{model_name}"
+    if cache_key not in st.session_state:
+        with st.spinner("Loading sentence transformer model..."):
+            st.session_state[cache_key] = SentenceTransformer(model_name)
+    
+    model = st.session_state[cache_key]
+    
+    for seg in unique_segments:
+        subset = q[q["segment"] == seg].copy()
+        if subset.empty:
+            continue
+            
+        indices = subset.index
+        n_queries = len(subset)
+        
+        if n_queries < 2:
+            q.loc[indices, "cluster_id"] = next_start_id
+            next_start_id += 1
+            continue
+        
+        # Generate embeddings using sentence-transformers
+        try:
+            embeddings = model.encode(subset["query_norm"].tolist(), show_progress_bar=False)
+            
+            # Calculate cosine similarity
+            sim_matrix = cosine_similarity(embeddings)
+            simdist = 1 - sim_matrix
+            simdist[simdist < 0] = 0
+            
+            if n_queries > CLUSTERING_THRESHOLD_N:
+                # Use MiniBatchKMeans for large datasets
+                n_clusters = max(5, int(n_queries / 10))
+                cl = MiniBatchKMeans(n_clusters=n_clusters, batch_size=1024, random_state=42, n_init="auto")
+                labels = cl.fit_predict(embeddings)
+            else:
+                # Use Agglomerative Clustering with semantic similarity
+                cl = AgglomerativeClustering(metric="precomputed", linkage="average", 
+                                             distance_threshold=0.75, n_clusters=None)
+                labels = cl.fit_predict(simdist)
+            
+            q.loc[indices, "cluster_id"] = labels + next_start_id
+            next_start_id += (labels.max() + 1) if len(labels) > 0 else 1
+            
+        except Exception as e:
+            # Fallback to TF-IDF if semantic clustering fails
+            st.warning(f"Semantic clustering failed for segment {seg}, using TF-IDF fallback: {e}")
+            vec = TfidfVectorizer(ngram_range=(1, 3), min_df=1, max_df=0.95)
+            try:
+                X = vec.fit_transform(subset["query_norm"].tolist())
+                simdist = 1 - cosine_similarity(X)
+                simdist[simdist < 0] = 0
+                cl = AgglomerativeClustering(metric="precomputed", linkage="average", 
+                                             distance_threshold=0.75, n_clusters=None)
+                labels = cl.fit_predict(simdist)
+                q.loc[indices, "cluster_id"] = labels + next_start_id
+                next_start_id += (labels.max() + 1) if len(labels) > 0 else 1
+            except:
+                q.loc[indices, "cluster_id"] = next_start_id
+                next_start_id += 1
+        
     return q
 
 def calculate_opportunity(q: pd.DataFrame) -> pd.DataFrame:
@@ -739,19 +976,15 @@ def main():
     **Stratified Logic:** Queries are split into **Branded/Non-Branded**, then by **Intent**, and clustered *within* those segments.
     """)
 
-    # --- Sidebar ---
-    st.sidebar.header("Client settings")
-    client_name = st.sidebar.text_input("Client name", value="Client")
-    brand_terms_input = st.sidebar.text_input("Brand terms (comma-separated)", value="")
-    brand_terms = [t.strip() for t in brand_terms_input.split(",") if t.strip()]
-
     # --- Upload ---
+    st.header("Step 1: Upload Data")
+    st.warning("⚠️ **GSC Export Limit**: Google Search Console UI limits exports to **1,000 rows maximum**. For larger datasets, use the GSC API or export multiple date ranges.")
     c1, c2 = st.columns(2)
-    q_file = c1.file_uploader("Upload GSC Queries CSV", type=["csv"])
-    p_file = c2.file_uploader("Upload GSC Pages CSV", type=["csv"])
+    q_file = c1.file_uploader("Upload GSC Queries CSV (max 1,000 rows)", type=["csv"])
+    p_file = c2.file_uploader("Upload GSC Pages CSV (max 1,000 rows)", type=["csv"])
 
     if not (q_file and p_file):
-        st.info("Please upload CSVs.")
+        st.info("Please upload both CSV files to continue.")
         st.stop()
 
     # --- Processing ---
@@ -763,6 +996,9 @@ def main():
         st.stop()
 
     # --- Column Mapping ---
+    st.header("Step 2: Column Mapping")
+    st.markdown("Map your CSV columns to the required fields. Auto-detection is performed automatically.")
+    
     # Initialize session state for column mappings
     if "queries_column_mapping" not in st.session_state:
         st.session_state.queries_column_mapping = {}
@@ -780,7 +1016,7 @@ def main():
         st.session_state.pages_column_mapping = pages_auto_mapping.copy()
     
     # Column Mapping UI
-    with st.expander("🔧 Column Mapping - Queries CSV", expanded=False):
+    with st.expander("🔧 Column Mapping - Queries CSV", expanded=True):
         st.markdown("**Detected columns:** " + ", ".join(queries_df.columns.tolist()))
         st.markdown("---")
         
@@ -811,7 +1047,7 @@ def main():
                 elif selected:
                     st.markdown("<br>✓ Selected", unsafe_allow_html=True)
     
-    with st.expander("🔧 Column Mapping - Pages CSV", expanded=False):
+    with st.expander("🔧 Column Mapping - Pages CSV", expanded=True):
         st.markdown("**Detected columns:** " + ", ".join(pages_df.columns.tolist()))
         st.markdown("---")
         
@@ -861,17 +1097,195 @@ def main():
         st.error(error_msg)
         st.stop()
 
-    with st.spinner("Running stratified pipeline..."):
-        intent_rules = build_intent_rules(brand_terms)
+    # --- Settings Configuration ---
+    st.header("Step 3: Configure Settings")
+    st.markdown("Configure all settings before starting the clustering process.")
+    
+    # Initialize intent keywords if not already done
+    if "intent_keywords" not in st.session_state:
+        default_keywords = {
+            "navigational": ["login", "sign in", "sign up", "contact", "customer service", "phone number"],
+            "transactional": ["buy", "order", "pricing", "price", "cost", "quote", "book", "booking", 
+                             "appointment", "request", "demo", "hire", "agency", "service", "services",
+                             "consultant", "company", "near me"],
+            "commercial": ["best", "top", "review", "reviews", "vs", "compare", "comparison", 
+                          "alternative", "alternatives", "rating", "ratings"],
+            "informational": ["how", "what", "why", "guide", "tutorial", "definition", "meaning",
+                            "example", "examples", "tips"]
+        }
+        st.session_state.intent_keywords = default_keywords
+    
+    # Client settings
+    col1, col2 = st.columns(2)
+    with col1:
+        client_name = st.text_input("Client name", value=st.session_state.get("client_name", "Client"), key="client_name_input")
+    with col2:
+        brand_terms_input = st.text_input("Brand terms (comma-separated)", value=st.session_state.get("brand_terms_input", ""), key="brand_terms_input", help="Terms that identify your brand (e.g., 'acme, acme corp')")
+        brand_terms = [t.strip() for t in brand_terms_input.split(",") if t.strip()]
+    
+    # Additional term categories
+    st.subheader("Term Categories")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        competitor_terms_input = st.text_input("Competitor terms (comma-separated)", value=st.session_state.get("competitor_terms_input", ""), key="competitor_terms_input", help="Competitor brand names to identify competitor-related queries")
+        competitor_terms = [t.strip() for t in competitor_terms_input.split(",") if t.strip()]
+        
+        local_terms_input = st.text_input("Local terms (cities, countries, etc.)", value=st.session_state.get("local_terms_input", ""), key="local_terms_input", help="Geographic terms like cities, countries, regions (e.g., 'amsterdam, netherlands, europe')")
+        local_terms = [t.strip() for t in local_terms_input.split(",") if t.strip()]
+        
+        product_brand_terms_input = st.text_input("Product brand terms (comma-separated)", value=st.session_state.get("product_brand_terms_input", ""), key="product_brand_terms_input", help="Brand names of products you sell (e.g., 'nike, adidas, puma')")
+        product_brand_terms = [t.strip() for t in product_brand_terms_input.split(",") if t.strip()]
+    
+    with col2:
+        product_names_terms_input = st.text_input("Product names terms (comma-separated)", value=st.session_state.get("product_names_terms_input", ""), key="product_names_terms_input", help="Specific product names or models (e.g., 'iphone 15, samsung galaxy, macbook pro')")
+        product_names_terms = [t.strip() for t in product_names_terms_input.split(",") if t.strip()]
+        
+        exclusion_terms_input = st.text_input("Exclusion terms (comma-separated)", value=st.session_state.get("exclusion_terms_input", ""), key="exclusion_terms_input", help="Terms to exclude from analysis - queries containing these will be filtered out")
+        exclusion_terms = [t.strip() for t in exclusion_terms_input.split(",") if t.strip()]
+    
+    # Clustering settings
+    st.subheader("Clustering Settings")
+    col1, col2 = st.columns(2)
+    with col1:
+        use_semantic_clustering = st.checkbox(
+            "Use Semantic Clustering (sentence-transformers)",
+            value=st.session_state.get("use_semantic_clustering", False),
+            help="Uses semantic embeddings for better clustering. Requires sentence-transformers library.",
+            key="use_semantic_clustering"
+        )
+        
+        if use_semantic_clustering and not SENTENCE_TRANSFORMERS_AVAILABLE:
+            st.error("sentence-transformers not installed. Install with: pip install sentence-transformers")
+            use_semantic_clustering = False
+            st.session_state.use_semantic_clustering = False
+    
+    with col2:
+        enable_singular_plural_merge = st.checkbox(
+            "Enable Singular/Plural Cluster Merging",
+            value=st.session_state.get("enable_singular_plural_merge", False),
+            help="Merge clusters that are singular/plural forms if they have the same intent",
+            key="enable_singular_plural_merge_config"
+        )
+        # Sync with session state
+        st.session_state.enable_singular_plural_merge = enable_singular_plural_merge
+    
+    # Intent Keywords Configuration
+    st.subheader("Intent Keywords")
+    st.markdown("Configure keywords used for intent classification. You can also manage these in the 'Intent Keywords' tab after processing.")
+    
+    intent_types = ["navigational", "transactional", "commercial", "informational"]
+    intent_cols = st.columns(2)
+    
+    for idx, intent_type in enumerate(intent_types):
+        with intent_cols[idx % 2]:
+            with st.expander(f"{intent_type.title()} Keywords", expanded=False):
+                current_keywords = st.session_state.intent_keywords.get(intent_type, [])
+                keywords_text = st.text_area(
+                    f"Keywords for {intent_type}",
+                    value="\n".join(current_keywords) if isinstance(current_keywords, list) else "",
+                    height=80,
+                    help="Enter keywords one per line, or comma-separated",
+                    key=f"intent_keywords_config_{intent_type}"
+                )
+                
+                if keywords_text:
+                    keywords_list = [k.strip() for k in keywords_text.replace(",", "\n").split("\n") if k.strip()]
+                    st.session_state.intent_keywords[intent_type] = keywords_list
+                else:
+                    st.session_state.intent_keywords[intent_type] = []
+                
+                st.caption(f"{len(st.session_state.intent_keywords.get(intent_type, []))} keywords")
+    
+    # Start Clustering Button
+    st.markdown("---")
+    st.header("Step 4: Start Clustering")
+    
+    # Initialize clustering trigger in session state
+    if "run_clustering" not in st.session_state:
+        st.session_state.run_clustering = False
+    
+    # Check if processing has been done
+    has_results = "q_final" in st.session_state and "cluster_final" in st.session_state
+    
+    if has_results:
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("🔄 Re-run Clustering", type="primary", use_container_width=True):
+                st.session_state.run_clustering = True
+                st.rerun()
+        with col2:
+            if st.button("✅ Use Previous Results", use_container_width=True):
+                st.session_state.run_clustering = False
+                st.rerun()
+    else:
+        if st.button("🚀 Start Clustering", type="primary", use_container_width=True):
+            st.session_state.run_clustering = True
+            st.rerun()
+    
+    if not st.session_state.run_clustering and not has_results:
+        st.info("Configure your settings above and click 'Start Clustering' to begin processing.")
+        st.stop()
+    
+    if st.session_state.run_clustering:
+        with st.spinner("Running stratified pipeline..."):
+            # Get intent keywords from session state if available
+            custom_intent_keywords = st.session_state.get("intent_keywords", None)
+            
+            # Convert keywords to regex patterns
+            custom_rules = None
+            if custom_intent_keywords:
+                custom_rules = {}
+                for intent, keywords in custom_intent_keywords.items():
+                    if isinstance(keywords, list):
+                        # Convert keywords to regex patterns
+                        patterns = [rf"\b{re.escape(k)}\b" for k in keywords if k]
+                        custom_rules[intent] = patterns
+            
+            intent_rules = build_intent_rules(brand_terms, custom_rules)
         compiled_rules = compile_rules(intent_rules)
         brand_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in brand_terms]
+            
+            # Build regexes for new term categories
+            competitor_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in competitor_terms] if competitor_terms else None
+            local_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in local_terms] if local_terms else None
+            product_brand_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in product_brand_terms] if product_brand_terms else None
+            product_names_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in product_names_terms] if product_names_terms else None
+            exclusion_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in exclusion_terms] if exclusion_terms else None
 
         # Pipeline
-        q_clean = preprocess_queries(queries_df, compiled_rules, brand_regexes, st.session_state.queries_column_mapping)
-        p_clean = preprocess_pages(pages_df, st.session_state.pages_column_mapping)
-        
+            q_clean = preprocess_queries(
+                queries_df, 
+                compiled_rules, 
+                brand_regexes, 
+                st.session_state.queries_column_mapping,
+                exclusion_regexes=exclusion_regexes,
+                competitor_regexes=competitor_regexes,
+                local_regexes=local_regexes,
+                product_brand_regexes=product_brand_regexes,
+                product_names_regexes=product_names_regexes
+            )
+            
+            # Show exclusion message if queries were excluded
+            excluded_count = getattr(q_clean, '_excluded_count', 0)
+            if excluded_count > 0:
+                st.info(f"ℹ️ {excluded_count} query/queries were excluded based on exclusion terms.")
+            
+            p_clean = preprocess_pages(pages_df, st.session_state.pages_column_mapping)
+            
+            # Choose clustering method
+            use_semantic_clustering = st.session_state.get("use_semantic_clustering", False)
+            if use_semantic_clustering and SENTENCE_TRANSFORMERS_AVAILABLE:
+                q_clustered = cluster_queries_stratified_semantic(q_clean)
+            else:
         q_clustered = cluster_queries_stratified(q_clean)
+            
         q_labeled = label_clusters(q_clustered)
+        
+            # Apply singular/plural merging if enabled
+            enable_merge = st.session_state.get("enable_singular_plural_merge", False)
+            if enable_merge:
+                q_labeled = merge_singular_plural_clusters(q_labeled)
         
         q_opp = calculate_opportunity(q_labeled)
         cluster_agg = aggregate_clusters(q_opp)
@@ -879,18 +1293,61 @@ def main():
         q_final, cluster_final = map_clusters_to_pages(q_opp, cluster_agg, p_clean)
         page_opps_all, page_opps_segment = calculate_page_opportunities(q_final, p_clean, cluster_final)
         
-        st.success("Done!")
+            # Store results in session state
+            st.session_state.q_final = q_final
+            st.session_state.cluster_final = cluster_final
+            st.session_state.page_opps_all = page_opps_all
+            st.session_state.page_opps_segment = page_opps_segment
+            st.session_state.client_name = client_name
+            st.session_state.brand_terms = brand_terms
+            st.session_state.competitor_terms = competitor_terms
+            st.session_state.local_terms = local_terms
+            st.session_state.product_brand_terms = product_brand_terms
+            st.session_state.product_names_terms = product_names_terms
+            st.session_state.exclusion_terms = exclusion_terms
+            st.session_state.run_clustering = False  # Reset flag
+        
+        st.success("Done! Results are ready.")
+    
+    # Use results from session state
+    if "q_final" in st.session_state:
+        q_final = st.session_state.q_final
+        cluster_final = st.session_state.cluster_final
+        page_opps_all = st.session_state.page_opps_all
+        page_opps_segment = st.session_state.page_opps_segment
+        client_name = st.session_state.get("client_name", "Client")
+        brand_terms = st.session_state.get("brand_terms", [])
+    else:
+        st.info("Configure your settings above and click 'Start Clustering' to begin processing.")
+        st.stop()
 
     # --- Results ---
-    tabs = st.tabs(["Visuals", "Tables", "Download"])
+    tabs = st.tabs(["Visuals", "Tables", "Intent Keywords", "Download"])
 
     with tabs[0]:
         st.subheader("Top Opportunity Clusters")
         
-        # Filters
+        # Filters - Brand first, then Intent (filtered by brand)
         f1, f2, f3 = st.columns(3)
-        sel_brand = f1.selectbox("Brand Segment", ["All", "Branded", "Non-Branded"])
-        sel_intent = f2.selectbox("Intent", ["All", "informational", "commercial", "transactional", "navigational"])
+        
+        # Brand filter (first)
+        sel_brand = f1.selectbox("1. Brand Segment", ["All", "Branded", "Non-Branded"])
+        
+        # Filter data based on selected brand for intent options
+        temp_df = cluster_final.copy()
+        if sel_brand != "All":
+            temp_df = temp_df[temp_df["brand_label"] == sel_brand]
+        
+        # Get available intents for selected brand
+        available_intents = sorted(temp_df["intent"].dropna().unique().tolist()) if "intent" in temp_df.columns and len(temp_df["intent"].dropna()) > 0 else []
+        intent_options = ["All"] + available_intents
+        
+        # Intent filter (second, filtered by brand)
+        sel_intent = f2.selectbox(
+            "2. Intent",
+            options=intent_options,
+            help="Intents shown are filtered by selected brand"
+        )
         
         # Filter Logic (Use cluster_final now)
         df_viz = cluster_final.copy()
@@ -899,10 +1356,12 @@ def main():
             df_viz = df_viz[df_viz["brand_label"] == sel_brand]
         if sel_intent != "All":
             df_viz = df_viz[df_viz["intent"] == sel_intent]
-        
-        # Show opportunity clicks per intent
+            
+        # Show opportunity clicks per intent (filtered by selected brand)
         st.markdown("### Opportunity Clicks by Intent")
-        intent_opps = cluster_final.groupby("intent")["opportunity_clicks"].sum().sort_values(ascending=False)
+        # Use filtered data for intent opportunities if brand is selected
+        intent_source = temp_df if sel_brand != "All" else cluster_final
+        intent_opps = intent_source.groupby("intent")["opportunity_clicks"].sum().sort_values(ascending=False)
         intent_cols = st.columns(len(intent_opps))
         for idx, (intent_name, opp_clicks) in enumerate(intent_opps.items()):
             with intent_cols[idx]:
@@ -921,7 +1380,7 @@ def main():
         
         # Also show filtered total if filters are applied
         if sel_brand != "All" or sel_intent != "All":
-            st.metric("Opportunity Clicks (Filtered)", f"{df_viz['opportunity_clicks'].sum():,.0f}")
+        st.metric("Opportunity Clicks (Filtered)", f"{df_viz['opportunity_clicks'].sum():,.0f}")
         
         # Top 15 Clusters for Bubble Chart
         top_15 = df_viz.sort_values("opportunity_clicks", ascending=False).head(15).copy()
@@ -1077,49 +1536,68 @@ def main():
                 q_with_cluster["topic_label"] = q_with_cluster["cluster_id"].map(topic_map)
             
             # Get unique values for filters (handle missing columns gracefully)
-            unique_topics = sorted(q_with_cluster["topic_label"].dropna().unique().tolist()) if "topic_label" in q_with_cluster.columns and len(q_with_cluster["topic_label"].dropna()) > 0 else []
-            unique_intents = sorted(q_with_cluster["intent"].dropna().unique().tolist()) if "intent" in q_with_cluster.columns and len(q_with_cluster["intent"].dropna()) > 0 else []
-            unique_brands = sorted(q_with_cluster["brand_label"].dropna().unique().tolist()) if "brand_label" in q_with_cluster.columns and len(q_with_cluster["brand_label"].dropna()) > 0 else []
+            # Start with all unique values
+            all_unique_brands = sorted(q_with_cluster["brand_label"].dropna().unique().tolist()) if "brand_label" in q_with_cluster.columns and len(q_with_cluster["brand_label"].dropna()) > 0 else []
             
-            # Filters
+            # Filters - Brand first
             col1, col2, col3 = st.columns(3)
             with col1:
-                selected_topics = st.multiselect(
-                    "Filter by Topic",
-                    options=unique_topics,
-                    default=[],
-                    key="keyword_filter_topics"
-                )
-            with col2:
-                selected_intents = st.multiselect(
-                    "Filter by Intent",
-                    options=unique_intents,
-                    default=[],
-                    key="keyword_filter_intents"
-                )
-            with col3:
                 selected_brands = st.multiselect(
-                    "Filter by Brand",
-                    options=unique_brands,
+                    "1. Filter by Brand",
+                    options=all_unique_brands,
                     default=[],
                     key="keyword_filter_brands"
                 )
             
-            # Apply filters
+            # Filter data based on selected brands for topic options
+            temp_filtered = q_with_cluster.copy()
+            if selected_brands and "brand_label" in temp_filtered.columns:
+                temp_filtered = temp_filtered[temp_filtered["brand_label"].isin(selected_brands)]
+            
+            # Get topics filtered by selected brands
+            available_topics = sorted(temp_filtered["topic_label"].dropna().unique().tolist()) if "topic_label" in temp_filtered.columns and len(temp_filtered["topic_label"].dropna()) > 0 else []
+            
+            with col2:
+                selected_topics = st.multiselect(
+                    "2. Filter by Topic",
+                    options=available_topics,
+                    default=[],
+                    key="keyword_filter_topics",
+                    help="Topics shown are filtered by selected brand(s)"
+                )
+            
+            # Filter data based on selected brands and topics for intent options
+            if selected_topics and "topic_label" in temp_filtered.columns:
+                temp_filtered = temp_filtered[temp_filtered["topic_label"].isin(selected_topics)]
+            
+            # Get intents filtered by selected brands and topics
+            available_intents = sorted(temp_filtered["intent"].dropna().unique().tolist()) if "intent" in temp_filtered.columns and len(temp_filtered["intent"].dropna()) > 0 else []
+            
+            with col3:
+                selected_intents = st.multiselect(
+                    "3. Filter by Intent",
+                    options=available_intents,
+                    default=[],
+                    key="keyword_filter_intents",
+                    help="Intents shown are filtered by selected brand(s) and topic(s)"
+                )
+            
+            # Apply all filters to the final dataset
             filtered_q = q_with_cluster.copy()
+            if selected_brands and "brand_label" in filtered_q.columns:
+                filtered_q = filtered_q[filtered_q["brand_label"].isin(selected_brands)]
             if selected_topics and "topic_label" in filtered_q.columns:
                 filtered_q = filtered_q[filtered_q["topic_label"].isin(selected_topics)]
             if selected_intents and "intent" in filtered_q.columns:
                 filtered_q = filtered_q[filtered_q["intent"].isin(selected_intents)]
-            if selected_brands and "brand_label" in filtered_q.columns:
-                filtered_q = filtered_q[filtered_q["brand_label"].isin(selected_brands)]
             
             # Display count
             st.metric("Filtered Keywords", len(filtered_q))
             
             # Select columns to display (only include columns that exist)
             all_display_cols = [
-                "query", "topic_label", "intent", "brand_label",
+                "query", "cluster_id", "topic_label", "segment", "intent", "brand_label",
+                "has_competitor", "has_local", "has_product_brand", "has_product_name",
                 "clicks", "impressions", "ctr", "position",
                 "opportunity_clicks", "priority_score", "priority_band", "primary_page"
             ]
@@ -1255,10 +1733,96 @@ def main():
             st.subheader("Page Opportunities by Segment")
             st.dataframe(page_opps_segment, use_container_width=True)
             
-            st.subheader("Clusters (with Top Queries)")
+        st.subheader("Clusters (with Top Queries)")
             st.dataframe(cluster_final, use_container_width=True)
 
+    # Tab: Intent Keywords Management
     with tabs[2]:
+        st.subheader("Intent Keywords Management")
+        st.markdown("Manage keywords used for intent classification. Save/load configurations as JSON.")
+        
+        # Initialize session state for intent keywords
+        if "intent_keywords" not in st.session_state:
+            # Load default rules (without regex patterns, just keywords)
+            default_keywords = {
+                "navigational": ["login", "sign in", "sign up", "contact", "customer service", "phone number"],
+                "transactional": ["buy", "order", "pricing", "price", "cost", "quote", "book", "booking", 
+                                 "appointment", "request", "demo", "hire", "agency", "service", "services",
+                                 "consultant", "company", "near me"],
+                "commercial": ["best", "top", "review", "reviews", "vs", "compare", "comparison", 
+                              "alternative", "alternatives", "rating", "ratings"],
+                "informational": ["how", "what", "why", "guide", "tutorial", "definition", "meaning",
+                                "example", "examples", "tips"]
+            }
+            st.session_state.intent_keywords = default_keywords
+        
+        # File uploader for JSON
+        col1, col2 = st.columns(2)
+        with col1:
+            uploaded_json = st.file_uploader("Load Intent Keywords from JSON", type=["json"], key="intent_json_upload")
+            if uploaded_json:
+                try:
+                    loaded_keywords = json.load(uploaded_json)
+                    if isinstance(loaded_keywords, dict):
+                        st.session_state.intent_keywords = loaded_keywords
+                        st.success("Intent keywords loaded successfully!")
+                    else:
+                        st.error("Invalid JSON format. Expected a dictionary.")
+                except json.JSONDecodeError as e:
+                    st.error(f"Error parsing JSON: {e}")
+        
+        with col2:
+            # Download JSON button
+            keywords_json = json.dumps(st.session_state.intent_keywords, indent=2)
+            st.download_button(
+                "Download Intent Keywords as JSON",
+                data=keywords_json,
+                file_name="intent_keywords.json",
+                mime="application/json",
+                key="intent_json_download"
+            )
+        
+        # Intent keyword editors
+        intent_types = ["navigational", "transactional", "commercial", "informational"]
+        
+        for intent_type in intent_types:
+            with st.expander(f"{intent_type.title()} Keywords", expanded=False):
+                current_keywords = st.session_state.intent_keywords.get(intent_type, [])
+                
+                # Text area for editing keywords
+                keywords_text = st.text_area(
+                    f"Keywords for {intent_type}",
+                    value="\n".join(current_keywords) if isinstance(current_keywords, list) else "",
+                    height=100,
+                    help="Enter keywords one per line, or comma-separated",
+                    key=f"intent_keywords_{intent_type}"
+                )
+                
+                # Parse keywords (handle both newline and comma separation)
+                if keywords_text:
+                    keywords_list = [k.strip() for k in keywords_text.replace(",", "\n").split("\n") if k.strip()]
+                    st.session_state.intent_keywords[intent_type] = keywords_list
+                else:
+                    st.session_state.intent_keywords[intent_type] = []
+                
+                # Show count
+                st.metric(f"{intent_type.title()} Keywords", len(st.session_state.intent_keywords.get(intent_type, [])))
+        
+        # Option to enable singular/plural merging
+        st.markdown("---")
+        enable_singular_plural_merge = st.checkbox(
+            "Enable Singular/Plural Cluster Merging",
+            value=st.session_state.get("enable_singular_plural_merge", False),
+            help="Merge clusters that are singular/plural forms if they have the same intent",
+            key="enable_singular_plural_merge_tab"
+        )
+        # Sync with session state
+        st.session_state.enable_singular_plural_merge = enable_singular_plural_merge
+        
+        if enable_singular_plural_merge:
+            st.info("When enabled, clusters with singular/plural topic variations will be merged if they share the same intent.")
+
+    with tabs[3]:
         st.subheader("Download Pack")
         
         brief_json, brief_md = build_gpt_brief(q_final, cluster_final, page_opps_all, page_opps_segment, brand_terms, client_name)

@@ -39,14 +39,36 @@ Results are banded into:
 - **P3 (Low)**: Bottom 70%
 
 ### 🔍 Cannibalization Detection
-Identifies when multiple pages compete for the same query clusters (match scores within 3% of each other), flagging potential internal competition issues.
+Identifies when multiple pages compete for the same query clusters (match scores within 3% of each other), flagging potential internal competition issues. Includes dedicated analysis table showing competing clusters and pages.
 
 ### 🌍 Multi-Language Support
 Supports GSC exports in any language with automatic column detection:
-- **Auto-detection**: Automatically detects column names in English, Dutch, French, Spanish, German, and more
+- **Auto-detection**: Automatically detects column names in English, Dutch (including "vertoningen" for impressions), French, Spanish, German, and more
 - **Manual override**: Easily map columns manually if auto-detection doesn't match your CSV
 - **Visual mapping UI**: Expandable sections show detected columns and allow you to map each required field
 - **Validation**: Ensures all required columns are mapped before processing begins
+
+### 🎛️ Intent Keywords Management
+- **Customizable intent classification**: Edit keywords used for each intent type (navigational, transactional, commercial, informational)
+- **JSON export/import**: Save and load intent keyword configurations
+- **Per-intent editing**: Edit keywords directly in the app or via the Intent Keywords tab
+
+### 🔗 Singular/Plural Cluster Merging
+- **Automatic detection**: Identifies clusters with singular/plural topic variations
+- **Smart merging**: Merges clusters if they share the same intent and have singular/plural relationships
+- **Optional feature**: Enable/disable via checkbox in settings
+
+### 🤖 Optional Semantic Clustering
+- **Sentence-transformers support**: Use semantic embeddings for better clustering (optional)
+- **Better semantic understanding**: Captures synonyms, context, and meaning better than TF-IDF
+- **Fallback**: Automatically falls back to TF-IDF if sentence-transformers is not available
+- **Model**: Uses `all-MiniLM-L6-v2` by default (fast and efficient)
+
+### 📊 Advanced Analysis Tables
+- **All Keywords**: Filterable keyword-level table with cascading filters (Brand → Topic → Intent)
+- **Cannibalization Risks**: Detailed analysis of competing clusters and pages
+- **Action Priority**: Clusters sorted by effort level (low to high) for prioritization
+- **Raw Data**: Original aggregated tables for reference
 
 ## Installation
 
@@ -77,43 +99,67 @@ The app will open in your default browser at `http://localhost:8501`
 
 ### Step 1: Export Data from Google Search Console
 
+⚠️ **Important**: Google Search Console UI limits exports to **1,000 rows maximum**. For larger datasets, use the GSC API or export multiple date ranges.
+
 Export two CSV files from GSC (same date range):
 
 1. **Queries Export** (`Queries` report):
    - Required data: Query/Page column, Clicks, Impressions, CTR, Position
    - **Note**: Column names can be in any language (English, Dutch, French, Spanish, German, etc.)
    - Date range: Recommended 3-6 months for better clustering
+   - **Limit**: Maximum 1,000 rows per export
 
 2. **Pages Export** (`Pages` report):
    - Required data: Page/URL column, Clicks, Impressions, CTR, Position
    - Same date range as queries
    - **Note**: Column names can be in any language
+   - **Limit**: Maximum 1,000 rows per export
 
-### Step 2: Configure Settings
-
-In the sidebar:
-- **Client name**: Used in reports and briefs
-- **Brand terms**: Comma-separated list of brand terms (e.g., `"acme, acme corp, acme inc"`)
-  - Used to classify queries as branded/non-branded
-  - Also included in navigational intent detection
-
-### Step 3: Upload and Map Columns
+### Step 2: Upload and Map Columns
 
 1. Upload both CSV files using the file uploaders
 2. **Map columns** (if needed):
-   - Expand the "🔧 Column Mapping" sections for each CSV
+   - Column mapping sections are expanded by default
    - Review auto-detected column mappings (marked with ✅)
    - Manually adjust any mappings using the dropdown menus
    - All required fields must be mapped before processing
 3. The app will validate mappings and show errors if any are missing
 
-### Step 4: Process and Review
+### Step 3: Configure Settings
 
-1. Once all columns are mapped, processing begins automatically
-2. Review results in three tabs:
-   - **Visuals**: Interactive bubble charts with filters
-   - **Tables**: Detailed dataframes
-   - **Download**: ZIP report with all outputs
+Configure all settings before starting clustering:
+
+- **Client name**: Used in reports and briefs
+- **Brand terms**: Comma-separated list of brand terms (e.g., `"acme, acme corp, acme inc"`)
+  - Used to classify queries as branded/non-branded
+  - Also included in navigational intent detection
+
+**Clustering Settings:**
+- **Use Semantic Clustering**: Optional - uses sentence-transformers for better semantic understanding (requires `sentence-transformers` library)
+- **Enable Singular/Plural Merging**: Merges clusters with singular/plural variations if they share the same intent
+
+**Intent Keywords:**
+- Configure keywords used for intent classification per intent type
+- Edit keywords directly in expandable sections
+- Keywords are saved and used for processing
+
+### Step 4: Start Clustering
+
+1. Click the **"🚀 Start Clustering"** button to begin processing
+2. Processing runs the full pipeline:
+   - Query preprocessing and intent classification
+   - Stratified clustering (by brand and intent)
+   - Cluster labeling and opportunity calculation
+   - Page mapping and cannibalization detection
+3. Results are stored in session state for review
+
+### Step 5: Review Results
+
+Review results in four tabs:
+- **Visuals**: Interactive bubble charts with cascading filters (Brand → Intent)
+- **Tables**: Advanced analysis tables (All Keywords, Cannibalization Risks, Action Priority, Raw Data)
+- **Intent Keywords**: Manage and export intent keyword configurations
+- **Download**: ZIP report with all outputs
 
 ## Output Files
 
@@ -173,8 +219,14 @@ Default classification is "informational" if no patterns match.
 
 **For segments with < 10,000 queries:**
 - Uses **Agglomerative Clustering** with cosine similarity
-- Distance threshold: 0.85 (85% similarity required)
+- Distance threshold: 0.75 (75% similarity required)
 - Linkage: average
+
+**Optional Semantic Clustering (sentence-transformers):**
+- Uses pre-trained transformer models for semantic embeddings
+- Better understanding of synonyms and context
+- Same distance threshold (0.75) and clustering logic
+- Falls back to TF-IDF if sentence-transformers is not available
 
 **For segments with ≥ 10,000 queries:**
 - Uses **MiniBatchKMeans** for performance
@@ -251,12 +303,32 @@ Interactive Plotly chart showing:
 
 The gap between outer and inner bubbles represents the opportunity.
 
-### Filters
+### Filters (Cascading)
 
-- **Brand Segment**: All, Branded, Non-Branded
-- **Intent**: All, informational, commercial, transactional, navigational
+- **Brand Segment** (first): All, Branded, Non-Branded
+- **Intent** (second, filtered by brand): Shows only intents available for selected brand
 
-Filtered results update the chart and opportunity metric.
+Filters cascade - selecting a brand updates available intents. Opportunity clicks metrics update to reflect brand selection.
+
+### Analysis Tables
+
+**All Keywords Tab:**
+- Filterable by Brand → Topic → Intent (cascading filters)
+- Shows all individual queries with metrics
+- Includes: query, cluster_id, topic_label, segment, intent, brand_label, clicks, impressions, CTR, position, opportunity_clicks, priority_score, priority_band, primary_page
+- Sortable by multiple columns
+
+**Cannibalization Risks Tab:**
+- Shows competing clusters and the pages they target
+- Displays primary vs competing cluster information
+- Color-coded risk levels (High/Medium/Low)
+- Sorted by score difference (smallest = highest risk)
+
+**Action Priority Tab:**
+- Sorted by effort level (low to high), then by opportunity_clicks
+- Grouped by effort level with expandable sections
+- Shows counts per effort level
+- Effort levels: Low (CTR/snippet), Medium (Content refresh), Medium-High (Fix cannibalisation), High (Build/upgrade landing page)
 
 ## Technical Details
 
@@ -284,15 +356,21 @@ Filtered results update the chart and opportunity metric.
 - `plotly`: Interactive visualizations
 - `matplotlib`: Static charts
 - `scipy`: Scientific computing (used by sklearn)
+- `sentence-transformers` (optional): Semantic clustering support
 
 ## Tips for Best Results
 
-1. **Date Range**: Use 3-6 months of data for stable clustering
-2. **Brand Terms**: Include all variations (e.g., "acme, acme corp, acme inc")
-3. **Data Quality**: Ensure GSC exports include all required columns (in any language)
-4. **Column Mapping**: For non-English exports, review auto-detected mappings and adjust if needed
-5. **Review Clusters**: Check topic labels make sense; adjust brand terms if needed
-6. **Cannibalization**: Pay attention to flagged clusters; may need canonical tags or content consolidation
+1. **GSC Export Limit**: Remember GSC UI limits exports to 1,000 rows. For larger datasets, use the GSC API or export multiple date ranges
+2. **Date Range**: Use 3-6 months of data for stable clustering
+3. **Brand Terms**: Include all variations (e.g., "acme, acme corp, acme inc")
+4. **Data Quality**: Ensure GSC exports include all required columns (in any language)
+5. **Column Mapping**: For non-English exports, review auto-detected mappings and adjust if needed
+6. **Intent Keywords**: Customize intent keywords to match your industry/niche for better classification
+7. **Semantic Clustering**: Consider using semantic clustering for better results (requires sentence-transformers installation)
+8. **Singular/Plural Merging**: Enable if you want to merge clusters with singular/plural variations
+9. **Review Clusters**: Check topic labels make sense; adjust brand terms if needed
+10. **Cannibalization**: Pay attention to flagged clusters; may need canonical tags or content consolidation
+11. **Action Priority**: Use the Action Priority table to focus on low-effort, high-impact opportunities first
 
 ## Troubleshooting
 
@@ -310,6 +388,12 @@ Filtered results update the chart and opportunity metric.
 ### Performance issues
 - For very large datasets (>50k queries), processing may take 1-2 minutes
 - Consider filtering GSC exports to top queries/pages if needed
+- Semantic clustering may be slower on first run (model download), but subsequent runs are faster due to caching
+
+### GSC Export Limitations
+- **1,000 row limit**: GSC UI exports are limited to 1,000 rows maximum
+- **Workaround**: Use GSC API for larger datasets, or export multiple date ranges and combine
+- **Impact**: Smaller datasets may have less stable clustering - consider using semantic clustering for better results
 
 ## License
 

@@ -1243,8 +1243,8 @@ def main():
                         custom_rules[intent] = patterns
             
             intent_rules = build_intent_rules(brand_terms, custom_rules)
-        compiled_rules = compile_rules(intent_rules)
-        brand_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in brand_terms]
+            compiled_rules = compile_rules(intent_rules)
+            brand_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in brand_terms]
             
             # Build regexes for new term categories
             competitor_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in competitor_terms] if competitor_terms else None
@@ -1253,7 +1253,7 @@ def main():
             product_names_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in product_names_terms] if product_names_terms else None
             exclusion_regexes = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE) for t in exclusion_terms] if exclusion_terms else None
 
-        # Pipeline
+            # Pipeline
             q_clean = preprocess_queries(
                 queries_df, 
                 compiled_rules, 
@@ -1278,20 +1278,20 @@ def main():
             if use_semantic_clustering and SENTENCE_TRANSFORMERS_AVAILABLE:
                 q_clustered = cluster_queries_stratified_semantic(q_clean)
             else:
-        q_clustered = cluster_queries_stratified(q_clean)
+                q_clustered = cluster_queries_stratified(q_clean)
             
-        q_labeled = label_clusters(q_clustered)
-        
+            q_labeled = label_clusters(q_clustered)
+            
             # Apply singular/plural merging if enabled
             enable_merge = st.session_state.get("enable_singular_plural_merge", False)
             if enable_merge:
                 q_labeled = merge_singular_plural_clusters(q_labeled)
-        
-        q_opp = calculate_opportunity(q_labeled)
-        cluster_agg = aggregate_clusters(q_opp)
-        
-        q_final, cluster_final = map_clusters_to_pages(q_opp, cluster_agg, p_clean)
-        page_opps_all, page_opps_segment = calculate_page_opportunities(q_final, p_clean, cluster_final)
+            
+            q_opp = calculate_opportunity(q_labeled)
+            cluster_agg = aggregate_clusters(q_opp)
+            
+            q_final, cluster_final = map_clusters_to_pages(q_opp, cluster_agg, p_clean)
+            page_opps_all, page_opps_segment = calculate_page_opportunities(q_final, p_clean, cluster_final)
         
             # Store results in session state
             st.session_state.q_final = q_final
@@ -1380,7 +1380,7 @@ def main():
         
         # Also show filtered total if filters are applied
         if sel_brand != "All" or sel_intent != "All":
-        st.metric("Opportunity Clicks (Filtered)", f"{df_viz['opportunity_clicks'].sum():,.0f}")
+            st.metric("Opportunity Clicks (Filtered)", f"{df_viz['opportunity_clicks'].sum():,.0f}")
         
         # Top 15 Clusters for Bubble Chart
         top_15 = df_viz.sort_values("opportunity_clicks", ascending=False).head(15).copy()
@@ -1733,7 +1733,7 @@ def main():
             st.subheader("Page Opportunities by Segment")
             st.dataframe(page_opps_segment, use_container_width=True)
             
-        st.subheader("Clusters (with Top Queries)")
+            st.subheader("Clusters (with Top Queries)")
             st.dataframe(cluster_final, use_container_width=True)
 
     # Tab: Intent Keywords Management
